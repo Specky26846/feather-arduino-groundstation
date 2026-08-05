@@ -1,0 +1,15 @@
+# Local capture / GDS session artifacts
+logs/
+
+# macOS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Arduino / arduino-cli build outputs
+build/
+*.hex
+*.elf
+*.bin
+*.map
+.arduinoIDE/

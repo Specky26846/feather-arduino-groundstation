@@ -1,0 +1,3 @@
+[submodule "libraries/RadioHead"]
+	path = libraries/RadioHead
+	url = https://github.com/adafruit/RadioHead.git
