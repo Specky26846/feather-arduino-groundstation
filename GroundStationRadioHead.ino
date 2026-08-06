@@ -3,6 +3,7 @@
 // RadioHead provides SPI/register access; this sketch owns RFM69's 255-byte
 // packet mode because RadioHead's normal send()/recv() API is limited to 60 B.
 #include <RH_RF69.h>
+#include <zlib.h> // for CRC32 checksum calculation function
 
 namespace {
 enum : uint8_t { CS = 8, DIO0 = 3, RST = 4, LED = 13, MAX_PACKET = 255,
@@ -22,7 +23,8 @@ constexpr uint32_t USB_IDLE_FLUSH_MS = 100;
 constexpr uint32_t POST_TX_GAP_MS = 50;
 // Overflow holding buffer for USB bytes that arrive while uplink[] is full / TX busy.
 constexpr uint16_t USB_HOLD_SIZE = 512;
-constexpr uint8_t SYNC[] = {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2};
+// Use 0xDEADBEEF as the sync word, following F Prime standard
+constexpr uint8_t SYNC[] = {0xDE, 0xAD, 0xBE, 0xEF};
 
 class Radio final : public RH_RF69 {
  public:
@@ -80,8 +82,9 @@ bool configure() {
       {RH_RF69_REG_19_RXBW, 0xE0}, {RH_RF69_REG_1A_AFCBW, 0xE0},
       {RH_RF69_REG_26_DIOMAPPING2, RH_RF69_DIOMAPPING2_CLKOUT_FXOSC_OFF},
       {RH_RF69_REG_29_RSSITHRESH, 0xE4}, {RH_RF69_REG_2C_PREAMBLEMSB, 0},
-      {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0xB8},
-      {RH_RF69_REG_37_PACKETCONFIG1, 0xD0}, {RH_RF69_REG_38_PAYLOADLENGTH, MAX_PACKET},
+      {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0x98}, // SyncSize = 3 for 4 bytes, binary 1001 1000 = 0x98
+      {RH_RF69_REG_37_PACKETCONFIG1, 0xC0}, // was 0xD0 for CrcOn, now disabled (bit 4 went from 1 -> 0)
+      {RH_RF69_REG_38_PAYLOADLENGTH, MAX_PACKET},
       {RH_RF69_REG_3C_FIFOTHRESH, 0x80 | FIFO_THRESHOLD},
       {RH_RF69_REG_3D_PACKETCONFIG2, 0x02},
       {RH_RF69_REG_5A_TESTPA1, RH_RF69_TESTPA1_NORMAL},
@@ -132,7 +135,21 @@ bool sendPacket(const uint8_t* data, uint8_t length) {
   restartRx(); return false;
 }
 
-void receivePacket() {
+void receivePacket() { // recieves a packet from the radio and sends it to the UART serial port if connected
+
+  uint32_t crc = crc32(0L, Z_NULL, 0); // initialize CRC32
+  crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
+
+  // convert CRC32 to big-endian byte array for transmission
+  uint8_t crc_bytes[4]; // 4 bytes of 8 bits each (32 total bits)
+  crc_bytes[0] = (crc << 24) & 0xFF; // last byte becomes first byte
+  crc_bytes[1] = (crc << 16) & 0xFF;
+  crc_bytes[2] = (crc << 8) & 0xFF;
+  crc_bytes[3] = crc & 0xFF; // in Big Endian now
+
+  uint8_t len_byte[4] = {0, 0, 0, 0}; // 4 bytes of 8 bits each (32 total bits)
+  len_byte[3] = downlinkLength; // last byte of the length is the actual length of the payload
+
   uint8_t flags = radio.spiRead(RH_RF69_REG_28_IRQFLAGS2);
   if (!receiving) {
     const bool started = (radio.spiRead(RH_RF69_REG_27_IRQFLAGS1) & RH_RF69_IRQFLAGS1_SYNADDRESSMATCH) ||
@@ -155,8 +172,14 @@ void receivePacket() {
     downlinkOffset += count;
   }
   if (downlinkOffset == downlinkLength) {
-    if (Serial.dtr()) Serial.write(downlink, downlinkLength);
-    restartRx();
+    // I have the sync character, length byte, and CRC32 bytes. Now send in packet order: sync, length, payload, CRC32.
+    if (Serial.dtr()) { // if the USB serial is connected, send the data
+      Serial.write(SYNC, sizeof(SYNC)); // send sync character
+      Serial.write(len_byte, 4); // send length byte
+      Serial.write(downlink, downlinkLength); // send payload
+      Serial.write(crc_bytes, 4); // send CRC32 bytes (transformed to Big Endian)
+      restartRx();
+    }
   }
 }
 
