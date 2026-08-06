@@ -7,7 +7,7 @@
 
 namespace {
 enum : uint8_t { CS = 8, DIO0 = 3, RST = 4, LED = 13, MAX_PACKET = 255,
-                 FIFO_PAYLOAD = 65, FIFO_THRESHOLD = 15, SP_HEADER = 6,
+                 FIFO_PAYLOAD = 65, FIFO_THRESHOLD = 15, PACKET_HEADER = 8, CRC_SIZE = 4,
                  // FIFO top-up burst during TX: FIFO(66) - threshold(15) - margin,
                  // matching flight Rfm69Radio TX_TOP_UP_CHUNK so refills stay ahead
                  // of the transmitter for packets larger than the 66-byte FIFO.
@@ -83,7 +83,7 @@ bool configure() {
       {RH_RF69_REG_26_DIOMAPPING2, RH_RF69_DIOMAPPING2_CLKOUT_FXOSC_OFF},
       {RH_RF69_REG_29_RSSITHRESH, 0xE4}, {RH_RF69_REG_2C_PREAMBLEMSB, 0},
       {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0x98}, // SyncSize = 3 for 4 bytes, binary 1001 1000 = 0x98
-      {RH_RF69_REG_37_PACKETCONFIG1, 0xC0}, // was 0xD0 for CrcOn, now disabled (bit 4 went from 1 -> 0)
+      {RH_RF69_REG_37_PACKETCONFIG1, 0xC0}, // disabled CrcOn because default is CRC16 and we want CRC32
       {RH_RF69_REG_38_PAYLOADLENGTH, MAX_PACKET},
       {RH_RF69_REG_3C_FIFOTHRESH, 0x80 | FIFO_THRESHOLD},
       {RH_RF69_REG_3D_PACKETCONFIG2, 0x02},
@@ -177,6 +177,7 @@ void receivePacket() { // recieves a packet from the radio and sends it to the U
       Serial.write(SYNC, sizeof(SYNC)); // send sync character
       Serial.write(len_byte, 4); // send length byte
       Serial.write(downlink, downlinkLength); // send payload
+      // may want to move CRC32 calculation here
       Serial.write(crc_bytes, 4); // send CRC32 bytes (transformed to Big Endian)
       restartRx();
     }
@@ -220,10 +221,10 @@ void receiveUsb() {
   // Respect post-TX RF turnaround before starting another uplink packet.
   if (millis() < postTxReadyMs) return;
 
-  // Aggregate until one complete Space Packet is buffered, then TX it.
-  while (uplinkLength >= SP_HEADER) {
-    const uint8_t version = (uplink[0] >> 5) & 0x7;
-    if (version != 0) {
+  // Aggregate if you encounter a 0xDEADBEEF sync word, if not drop the byte and continue
+  while (uplinkLength >= SP_HEADER) {  
+    if (uplink[0] != SYNC[0] || uplink[1] != SYNC[1] ||
+        uplink[2] != SYNC[2] || uplink[3] != SYNC[3]) {
       shiftUplink(1);
       continue;
     }
@@ -242,12 +243,12 @@ void receiveUsb() {
       break;
     }
 
-    if (uplinkLength < total) break;
-    if (!sendPacket(uplink, static_cast<uint8_t>(total))) {
+    if (uplinkLength < total) break; // if full packet has not arrived yet, break and wait
+    if (!sendPacket(uplink, static_cast<uint8_t>(total))) { // transmit - if transmission fails, drop the packet and continue
       shiftUplink(static_cast<uint8_t>(total));
       break;
     }
-    shiftUplink(static_cast<uint8_t>(total));
+    shiftUplink(static_cast<uint8_t>(total)); // after success transmit, drop the packet from uplink buffer
     pullHoldIntoUplink();
     if (millis() < postTxReadyMs) break;
   }
