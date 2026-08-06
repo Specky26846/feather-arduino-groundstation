@@ -188,9 +188,9 @@ void receivePacket() { // RADIO -> UART
       crc = ~crc;
       // convert CRC32 to big-endian byte array for transmission
       uint8_t crc_bytes[4]; // 4 bytes of 8 bits each (32 total bits)
-      crc_bytes[0] = (crc << 24) & 0xFF; // last byte becomes first byte
-      crc_bytes[1] = (crc << 16) & 0xFF;
-      crc_bytes[2] = (crc << 8) & 0xFF;
+      crc_bytes[0] = (crc >> 24) & 0xFF; // last byte becomes first byte
+      crc_bytes[1] = (crc >> 16) & 0xFF;
+      crc_bytes[2] = (crc >> 8) & 0xFF;
       crc_bytes[3] = crc & 0xFF; // in Big Endian now
 
       digitalWrite(LED, 1);
