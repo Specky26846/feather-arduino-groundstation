@@ -34,7 +34,8 @@ constexpr uint32_t POST_TX_GAP_MS = 50;
 // Overflow holding buffer for USB bytes that arrive while uplink[] is full / TX busy.
 constexpr uint16_t USB_HOLD_SIZE = 512;
 // Use 0xDEADBEEF as the sync word, following F Prime standard
-constexpr uint8_t SYNC[] = {0xDE, 0xAD, 0xBE, 0xEF};
+constexpr uint8_t FPRIME_SYNC[] = {0xDE, 0xAD, 0xBE, 0xEF};
+constexpr uint8_t SYNC[] = {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2};
 
 class Radio final : public RH_RF69 {
  public:
@@ -92,8 +93,8 @@ bool configure() {
       {RH_RF69_REG_19_RXBW, 0xE0}, {RH_RF69_REG_1A_AFCBW, 0xE0},
       {RH_RF69_REG_26_DIOMAPPING2, RH_RF69_DIOMAPPING2_CLKOUT_FXOSC_OFF},
       {RH_RF69_REG_29_RSSITHRESH, 0xE4}, {RH_RF69_REG_2C_PREAMBLEMSB, 0},
-      {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0x98}, // SyncSize = 3 for 4 bytes, binary 1001 1000 = 0x98
-      {RH_RF69_REG_37_PACKETCONFIG1, 0xC0}, // disabled CrcOn because default is CRC16 and we want CRC32
+      {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0xB8}, // SyncSize = 3 for 4 bytes, binary 1001 1000 = 0x98
+      {RH_RF69_REG_37_PACKETCONFIG1, 0xD0},
       {RH_RF69_REG_38_PAYLOADLENGTH, MAX_PACKET},
       {RH_RF69_REG_3C_FIFOTHRESH, 0x80 | FIFO_THRESHOLD},
       {RH_RF69_REG_3D_PACKETCONFIG2, 0x02},
@@ -150,8 +151,6 @@ void receivePacket() { // RADIO -> UART
 
   uint32_t crc = crc32(0L, nullptr, 0); // initialize CRC32
 
-  uint8_t len_byte[4] = {0, 0, 0, 0}; // 4 bytes of 8 bits each (32 total bits)
-  len_byte[3] = downlinkLength; // last byte of the length is the actual length of the payload
 
   uint8_t flags = radio.spiRead(RH_RF69_REG_28_IRQFLAGS2);
   if (!receiving) {
@@ -178,8 +177,10 @@ void receivePacket() { // RADIO -> UART
     // I have the sync character, length byte, and CRC32 bytes. Now send in packet order: sync, length, payload, CRC32.
     if (Serial.dtr()) { // if the USB serial is connected, send the data
 
-      Serial.write(SYNC, sizeof(SYNC)); // send sync character
-      crc = crc32(crc, SYNC, sizeof(SYNC)); // now we have the CRC32 in LSB (feather M0 is little-endian)
+      Serial.write(FPRIME_SYNC, sizeof(FPRIME_SYNC)); // send sync character
+      crc = crc32(crc, FPRIME_SYNC, sizeof(FPRIME_SYNC)); // now we have the CRC32 in LSB (feather M0 is little-endian)
+      uint8_t len_byte[4] = {0, 0, 0, 0}; // 4 bytes of 8 bits each (32 total bits)
+      len_byte[3] = downlinkLength; // last byte of the length is the actual length of the payload
       Serial.write(len_byte, 4); // send length byte
       crc = crc32(crc, len_byte, 4); // now we have the CRC32 in LSB (feather M0 is little-endian)
       Serial.write(downlink, downlinkLength); // send payload
@@ -239,8 +240,8 @@ void receiveUsb() { // UART -> RADIO
 
   // Aggregate if you encounter a 0xDEADBEEF sync word, if not drop the byte and continue
   while (uplinkLength >= PACKET_HEADER) {  // reading in just the header
-    if (uplink[0] != SYNC[0] || uplink[1] != SYNC[1] ||
-        uplink[2] != SYNC[2] || uplink[3] != SYNC[3]) {
+    if (uplink[0] != FPRIME_SYNC[0] || uplink[1] != FPRIME_SYNC[1] ||
+        uplink[2] != FPRIME_SYNC[2] || uplink[3] != FPRIME_SYNC[3]) {
       shiftUplink(1);
       continue;
     }
