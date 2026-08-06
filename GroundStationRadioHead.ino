@@ -186,7 +186,6 @@ void receivePacket() { // RADIO -> UART
       Serial.write(downlink, downlinkLength); // send payload
 
       crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
-      crc = ~crc;
       // convert CRC32 to big-endian byte array for transmission
       uint8_t crc_bytes[4]; // 4 bytes of 8 bits each (32 total bits)
       crc_bytes[0] = (crc >> 24) & 0xFF; // last byte becomes first byte
