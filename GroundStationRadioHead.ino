@@ -241,16 +241,17 @@ void receiveUsb() { // UART -> RADIO
     if (total > MAX_PACKET) {
       uplinkLength = 0;
       usbHoldLength = 0;
-      break;
+      shiftUplink(1);
+      continue;
     }
 
     if (uplinkLength < total) break; // if full packet has not arrived yet, break and wait
 
     // Strip software SYNC before RF transmission (hardware sync will frame it)
     // Send: [LEN][PAYLOAD][CRC32], skip [SYNC] at uplink[0..3]
-    if (!sendPacket(uplink + 4, static_cast<uint8_t>(total - 4))) { // transmit - if transmission fails, drop the packet and continue
+    if (!sendPacket(uplink + 8, static_cast<uint8_t>(total - 12))) { // transmit - if transmission fails, drop the packet and continue
       shiftUplink(static_cast<uint8_t>(total));
-      break;
+      continue;
     }
 
     shiftUplink(static_cast<uint8_t>(total)); // after success transmit, drop the packet from uplink buffer
