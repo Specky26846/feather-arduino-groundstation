@@ -184,14 +184,13 @@ void receivePacket() { // recieves a packet from the radio and sends it to the U
   }
 }
 
-// Parse CCSDS Space Packet primary header length field (bytes 4-5):
-// packet data length = N-1 octets of user data after the 6-byte header.
-// Full on-wire size = 6 + (N-1) + 1 = header.data_len + 7 ... actually
-// spacepackets: packet_len property is total bytes including header.
-// CCSDS: length field = (total octets in packet) - 7; total = length_field + 7.
-uint16_t spacePacketTotalLength(const uint8_t* hdr) {
-  const uint16_t lengthField = (static_cast<uint16_t>(hdr[4]) << 8) | hdr[5];
-  return static_cast<uint16_t>(lengthField + 7);
+// Parse custom packet length field (byte 7, last byte of 4-byte length field):
+// Format: [SYNC(4)][LENGTH(4)][PAYLOAD(N)][CRC32(4)]
+// LENGTH field: bytes 4-7, only byte 7 contains payload length (bytes 4-6 are zeros)
+// Total packet size = SYNC + LENGTH + PAYLOAD + CRC32 = 4 + 4 + N + 4 = 12 + N
+uint16_t parsePacketLength(const uint8_t* pkt) {
+  const uint8_t payloadLen = pkt[7];  // Last byte of LENGTH field
+  return static_cast<uint16_t>(PACKET_HEADER + payloadLen + CRC_SIZE);
 }
 
 void shiftUplink(uint8_t drop) {
@@ -222,15 +221,16 @@ void receiveUsb() {
   if (millis() < postTxReadyMs) return;
 
   // Aggregate if you encounter a 0xDEADBEEF sync word, if not drop the byte and continue
-  while (uplinkLength >= SP_HEADER) {  
+  while (uplinkLength >= PACKET_HEADER) {  // reading in just the header
     if (uplink[0] != SYNC[0] || uplink[1] != SYNC[1] ||
         uplink[2] != SYNC[2] || uplink[3] != SYNC[3]) {
       shiftUplink(1);
       continue;
     }
 
-    const uint16_t total = spacePacketTotalLength(uplink);
-    if (total < SP_HEADER) {
+    const uint16_t total = parsePacketLength(uplink);
+    // if the total length is less than the header + CRC, not a real packet, drop the first byte and continue
+    if (total < PACKET_HEADER + CRC_SIZE) {  
       shiftUplink(1);
       continue;
     }
@@ -244,10 +244,12 @@ void receiveUsb() {
     }
 
     if (uplinkLength < total) break; // if full packet has not arrived yet, break and wait
+
     if (!sendPacket(uplink, static_cast<uint8_t>(total))) { // transmit - if transmission fails, drop the packet and continue
       shiftUplink(static_cast<uint8_t>(total));
       break;
     }
+    
     shiftUplink(static_cast<uint8_t>(total)); // after success transmit, drop the packet from uplink buffer
     pullHoldIntoUplink();
     if (millis() < postTxReadyMs) break;
