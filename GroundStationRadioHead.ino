@@ -3,7 +3,17 @@
 // RadioHead provides SPI/register access; this sketch owns RFM69's 255-byte
 // packet mode because RadioHead's normal send()/recv() API is limited to 60 B.
 #include <RH_RF69.h>
-#include <zlib.h> // for CRC32 checksum calculation function
+
+// zlib-compatible CRC-32 (poly 0xEDB88320). SAMD has no zlib.h.
+uint32_t crc32(uint32_t crc, const uint8_t* buf, size_t len) {
+  crc = ~crc;
+  while (len--) {
+    crc ^= *buf++;
+    for (uint8_t i = 0; i < 8; ++i)
+      crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u));
+  }
+  return ~crc;
+}
 
 namespace {
 enum : uint8_t { CS = 8, DIO0 = 3, RST = 4, LED = 13, MAX_PACKET = 255,
@@ -138,7 +148,7 @@ bool sendPacket(const uint8_t* data, uint8_t length) {
 void receivePacket() { // RADIO -> UART
 // recieves a packet from the radio and sends it to the UART serial port if connected
 
-  uint32_t crc = crc32(0L, Z_NULL, 0); // initialize CRC32
+  uint32_t crc = crc32(0L, nullptr, 0); // initialize CRC32
   crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
 
   // convert CRC32 to big-endian byte array for transmission
