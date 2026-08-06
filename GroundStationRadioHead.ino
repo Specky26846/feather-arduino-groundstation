@@ -92,7 +92,7 @@ bool configure() {
       {RH_RF69_REG_6F_TESTDAGC, 0x30},
   };
   for (const auto& reg : cfg) radio.spiWrite(reg[0], reg[1]);
-  radio.spiBurstWrite(RH_RF69_REG_2F_SYNCVALUE1, SYNC, sizeof(SYNC));
+  radio.spiBurstWrite(RH_RF69_REG_2F_SYNCVALUE1, SYNC, sizeof(SYNC)); // double sync char write UART -> Radio
   radio.spiWrite(RH_RF69_REG_28_IRQFLAGS2, RH_RF69_IRQFLAGS2_FIFOOVERRUN);
   return mode(RH_RF69_OPMODE_MODE_RX);
 }
@@ -135,7 +135,8 @@ bool sendPacket(const uint8_t* data, uint8_t length) {
   restartRx(); return false;
 }
 
-void receivePacket() { // recieves a packet from the radio and sends it to the UART serial port if connected
+void receivePacket() { // RADIO -> UART
+// recieves a packet from the radio and sends it to the UART serial port if connected
 
   uint32_t crc = crc32(0L, Z_NULL, 0); // initialize CRC32
   crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
@@ -213,7 +214,7 @@ void pullHoldIntoUplink() {
   }
 }
 
-void receiveUsb() {
+void receiveUsb() { // UART -> RADIO
   drainUsbToHold();
   pullHoldIntoUplink();
 
@@ -245,11 +246,13 @@ void receiveUsb() {
 
     if (uplinkLength < total) break; // if full packet has not arrived yet, break and wait
 
-    if (!sendPacket(uplink, static_cast<uint8_t>(total))) { // transmit - if transmission fails, drop the packet and continue
+    // Strip software SYNC before RF transmission (hardware sync will frame it)
+    // Send: [LEN][PAYLOAD][CRC32], skip [SYNC] at uplink[0..3]
+    if (!sendPacket(uplink + 4, static_cast<uint8_t>(total - 4))) { // transmit - if transmission fails, drop the packet and continue
       shiftUplink(static_cast<uint8_t>(total));
       break;
     }
-    
+
     shiftUplink(static_cast<uint8_t>(total)); // after success transmit, drop the packet from uplink buffer
     pullHoldIntoUplink();
     if (millis() < postTxReadyMs) break;
