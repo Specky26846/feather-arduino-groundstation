@@ -3,10 +3,11 @@
 // RadioHead provides SPI/register access; this sketch owns RFM69's 255-byte
 // packet mode because RadioHead's normal send()/recv() API is limited to 60 B.
 #include <RH_RF69.h>
+#include <zlib.h> // for CRC32 checksum calculation function
 
 namespace {
 enum : uint8_t { CS = 8, DIO0 = 3, RST = 4, LED = 13, MAX_PACKET = 255,
-                 FIFO_PAYLOAD = 65, FIFO_THRESHOLD = 15, SP_HEADER = 6,
+                 FIFO_PAYLOAD = 65, FIFO_THRESHOLD = 15, PACKET_HEADER = 8, CRC_SIZE = 4,
                  // FIFO top-up burst during TX: FIFO(66) - threshold(15) - margin,
                  // matching flight Rfm69Radio TX_TOP_UP_CHUNK so refills stay ahead
                  // of the transmitter for packets larger than the 66-byte FIFO.
@@ -22,7 +23,8 @@ constexpr uint32_t USB_IDLE_FLUSH_MS = 100;
 constexpr uint32_t POST_TX_GAP_MS = 50;
 // Overflow holding buffer for USB bytes that arrive while uplink[] is full / TX busy.
 constexpr uint16_t USB_HOLD_SIZE = 512;
-constexpr uint8_t SYNC[] = {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2};
+// Use 0xDEADBEEF as the sync word, following F Prime standard
+constexpr uint8_t SYNC[] = {0xDE, 0xAD, 0xBE, 0xEF};
 
 class Radio final : public RH_RF69 {
  public:
@@ -80,8 +82,9 @@ bool configure() {
       {RH_RF69_REG_19_RXBW, 0xE0}, {RH_RF69_REG_1A_AFCBW, 0xE0},
       {RH_RF69_REG_26_DIOMAPPING2, RH_RF69_DIOMAPPING2_CLKOUT_FXOSC_OFF},
       {RH_RF69_REG_29_RSSITHRESH, 0xE4}, {RH_RF69_REG_2C_PREAMBLEMSB, 0},
-      {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0xB8},
-      {RH_RF69_REG_37_PACKETCONFIG1, 0xD0}, {RH_RF69_REG_38_PAYLOADLENGTH, MAX_PACKET},
+      {RH_RF69_REG_2D_PREAMBLELSB, 4}, {RH_RF69_REG_2E_SYNCCONFIG, 0x98}, // SyncSize = 3 for 4 bytes, binary 1001 1000 = 0x98
+      {RH_RF69_REG_37_PACKETCONFIG1, 0xC0}, // disabled CrcOn because default is CRC16 and we want CRC32
+      {RH_RF69_REG_38_PAYLOADLENGTH, MAX_PACKET},
       {RH_RF69_REG_3C_FIFOTHRESH, 0x80 | FIFO_THRESHOLD},
       {RH_RF69_REG_3D_PACKETCONFIG2, 0x02},
       {RH_RF69_REG_5A_TESTPA1, RH_RF69_TESTPA1_NORMAL},
@@ -89,7 +92,7 @@ bool configure() {
       {RH_RF69_REG_6F_TESTDAGC, 0x30},
   };
   for (const auto& reg : cfg) radio.spiWrite(reg[0], reg[1]);
-  radio.spiBurstWrite(RH_RF69_REG_2F_SYNCVALUE1, SYNC, sizeof(SYNC));
+  radio.spiBurstWrite(RH_RF69_REG_2F_SYNCVALUE1, SYNC, sizeof(SYNC)); // double sync char write UART -> Radio
   radio.spiWrite(RH_RF69_REG_28_IRQFLAGS2, RH_RF69_IRQFLAGS2_FIFOOVERRUN);
   return mode(RH_RF69_OPMODE_MODE_RX);
 }
@@ -132,7 +135,22 @@ bool sendPacket(const uint8_t* data, uint8_t length) {
   restartRx(); return false;
 }
 
-void receivePacket() {
+void receivePacket() { // RADIO -> UART
+// recieves a packet from the radio and sends it to the UART serial port if connected
+
+  uint32_t crc = crc32(0L, Z_NULL, 0); // initialize CRC32
+  crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
+
+  // convert CRC32 to big-endian byte array for transmission
+  uint8_t crc_bytes[4]; // 4 bytes of 8 bits each (32 total bits)
+  crc_bytes[0] = (crc << 24) & 0xFF; // last byte becomes first byte
+  crc_bytes[1] = (crc << 16) & 0xFF;
+  crc_bytes[2] = (crc << 8) & 0xFF;
+  crc_bytes[3] = crc & 0xFF; // in Big Endian now
+
+  uint8_t len_byte[4] = {0, 0, 0, 0}; // 4 bytes of 8 bits each (32 total bits)
+  len_byte[3] = downlinkLength; // last byte of the length is the actual length of the payload
+
   uint8_t flags = radio.spiRead(RH_RF69_REG_28_IRQFLAGS2);
   if (!receiving) {
     const bool started = (radio.spiRead(RH_RF69_REG_27_IRQFLAGS1) & RH_RF69_IRQFLAGS1_SYNADDRESSMATCH) ||
@@ -155,19 +173,25 @@ void receivePacket() {
     downlinkOffset += count;
   }
   if (downlinkOffset == downlinkLength) {
-    if (Serial.dtr()) Serial.write(downlink, downlinkLength);
-    restartRx();
+    // I have the sync character, length byte, and CRC32 bytes. Now send in packet order: sync, length, payload, CRC32.
+    if (Serial.dtr()) { // if the USB serial is connected, send the data
+      Serial.write(SYNC, sizeof(SYNC)); // send sync character
+      Serial.write(len_byte, 4); // send length byte
+      Serial.write(downlink, downlinkLength); // send payload
+      // may want to move CRC32 calculation here
+      Serial.write(crc_bytes, 4); // send CRC32 bytes (transformed to Big Endian)
+      restartRx();
+    }
   }
 }
 
-// Parse CCSDS Space Packet primary header length field (bytes 4-5):
-// packet data length = N-1 octets of user data after the 6-byte header.
-// Full on-wire size = 6 + (N-1) + 1 = header.data_len + 7 ... actually
-// spacepackets: packet_len property is total bytes including header.
-// CCSDS: length field = (total octets in packet) - 7; total = length_field + 7.
-uint16_t spacePacketTotalLength(const uint8_t* hdr) {
-  const uint16_t lengthField = (static_cast<uint16_t>(hdr[4]) << 8) | hdr[5];
-  return static_cast<uint16_t>(lengthField + 7);
+// Parse custom packet length field (byte 7, last byte of 4-byte length field):
+// Format: [SYNC(4)][LENGTH(4)][PAYLOAD(N)][CRC32(4)]
+// LENGTH field: bytes 4-7, only byte 7 contains payload length (bytes 4-6 are zeros)
+// Total packet size = SYNC + LENGTH + PAYLOAD + CRC32 = 4 + 4 + N + 4 = 12 + N
+uint16_t parsePacketLength(const uint8_t* pkt) {
+  const uint8_t payloadLen = pkt[7];  // Last byte of LENGTH field
+  return static_cast<uint16_t>(PACKET_HEADER + payloadLen + CRC_SIZE);
 }
 
 void shiftUplink(uint8_t drop) {
@@ -190,23 +214,24 @@ void pullHoldIntoUplink() {
   }
 }
 
-void receiveUsb() {
+void receiveUsb() { // UART -> RADIO
   drainUsbToHold();
   pullHoldIntoUplink();
 
   // Respect post-TX RF turnaround before starting another uplink packet.
   if (millis() < postTxReadyMs) return;
 
-  // Aggregate until one complete Space Packet is buffered, then TX it.
-  while (uplinkLength >= SP_HEADER) {
-    const uint8_t version = (uplink[0] >> 5) & 0x7;
-    if (version != 0) {
+  // Aggregate if you encounter a 0xDEADBEEF sync word, if not drop the byte and continue
+  while (uplinkLength >= PACKET_HEADER) {  // reading in just the header
+    if (uplink[0] != SYNC[0] || uplink[1] != SYNC[1] ||
+        uplink[2] != SYNC[2] || uplink[3] != SYNC[3]) {
       shiftUplink(1);
       continue;
     }
 
-    const uint16_t total = spacePacketTotalLength(uplink);
-    if (total < SP_HEADER) {
+    const uint16_t total = parsePacketLength(uplink);
+    // if the total length is less than the header + CRC, not a real packet, drop the first byte and continue
+    if (total < PACKET_HEADER + CRC_SIZE) {  
       shiftUplink(1);
       continue;
     }
@@ -219,12 +244,16 @@ void receiveUsb() {
       break;
     }
 
-    if (uplinkLength < total) break;
-    if (!sendPacket(uplink, static_cast<uint8_t>(total))) {
+    if (uplinkLength < total) break; // if full packet has not arrived yet, break and wait
+
+    // Strip software SYNC before RF transmission (hardware sync will frame it)
+    // Send: [LEN][PAYLOAD][CRC32], skip [SYNC] at uplink[0..3]
+    if (!sendPacket(uplink + 4, static_cast<uint8_t>(total - 4))) { // transmit - if transmission fails, drop the packet and continue
       shiftUplink(static_cast<uint8_t>(total));
       break;
     }
-    shiftUplink(static_cast<uint8_t>(total));
+
+    shiftUplink(static_cast<uint8_t>(total)); // after success transmit, drop the packet from uplink buffer
     pullHoldIntoUplink();
     if (millis() < postTxReadyMs) break;
   }
