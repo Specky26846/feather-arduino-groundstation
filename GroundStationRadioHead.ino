@@ -149,14 +149,6 @@ void receivePacket() { // RADIO -> UART
 // recieves a packet from the radio and sends it to the UART serial port if connected
 
   uint32_t crc = crc32(0L, nullptr, 0); // initialize CRC32
-  crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
-
-  // convert CRC32 to big-endian byte array for transmission
-  uint8_t crc_bytes[4]; // 4 bytes of 8 bits each (32 total bits)
-  crc_bytes[0] = (crc << 24) & 0xFF; // last byte becomes first byte
-  crc_bytes[1] = (crc << 16) & 0xFF;
-  crc_bytes[2] = (crc << 8) & 0xFF;
-  crc_bytes[3] = crc & 0xFF; // in Big Endian now
 
   uint8_t len_byte[4] = {0, 0, 0, 0}; // 4 bytes of 8 bits each (32 total bits)
   len_byte[3] = downlinkLength; // last byte of the length is the actual length of the payload
@@ -185,9 +177,23 @@ void receivePacket() { // RADIO -> UART
   if (downlinkOffset == downlinkLength) {
     // I have the sync character, length byte, and CRC32 bytes. Now send in packet order: sync, length, payload, CRC32.
     if (Serial.dtr()) { // if the USB serial is connected, send the data
+
       Serial.write(SYNC, sizeof(SYNC)); // send sync character
+      crc = crc32(crc, SYNC, sizeof(SYNC)); // now we have the CRC32 in LSB (feather M0 is little-endian)
       Serial.write(len_byte, 4); // send length byte
+      crc = crc32(crc, len_byte, 4); // now we have the CRC32 in LSB (feather M0 is little-endian)
       Serial.write(downlink, downlinkLength); // send payload
+
+      crc = crc32(crc, downlink, downlinkLength); // now we have the CRC32 in LSB (feather M0 is little-endian)
+      crc = ~crc;
+      // convert CRC32 to big-endian byte array for transmission
+      uint8_t crc_bytes[4]; // 4 bytes of 8 bits each (32 total bits)
+      crc_bytes[0] = (crc << 24) & 0xFF; // last byte becomes first byte
+      crc_bytes[1] = (crc << 16) & 0xFF;
+      crc_bytes[2] = (crc << 8) & 0xFF;
+      crc_bytes[3] = crc & 0xFF; // in Big Endian now
+
+      digitalWrite(LED, 1);
       // may want to move CRC32 calculation here
       Serial.write(crc_bytes, 4); // send CRC32 bytes (transformed to Big Endian)
       restartRx();
